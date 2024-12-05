@@ -86,7 +86,7 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS):
             continue
         quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
     
-    graph.cleanup(remove_unused_graph_inputs=True).toposort()
+    graph.cleanup(remove_unused_graph_inputs=False).toposort()
 
     no_shape_model = gs.export_onnx(graph)
     new_model = onnx.shape_inference.infer_shapes(no_shape_model)
