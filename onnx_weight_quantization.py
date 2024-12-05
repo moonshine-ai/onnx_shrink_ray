@@ -1,6 +1,7 @@
 import onnx_graphsurgeon as gs
 import numpy as np
 import onnx
+from onnxruntime.quantization import quantize_dynamic, QuantType
 
 # Don't quantify constants smaller than this.
 DEFAULT_MIN_ELEMENTS = 16 * 1024
@@ -84,9 +85,6 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, graph, 
         if tensor.name == original_output_tensor_name:
             graph.outputs[i] = dequantized_tensor
 
-    # Add the quantized tensor to the graph.
-    # graph.nodes.append(dequantized_tensor)
-
 def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False):
     graph = gs.import_onnx(model)
 
@@ -137,16 +135,19 @@ if __name__ == "__main__":
     import os
     import sys
 
+
     if len(sys.argv) < 2:
         input_globs = ["*.onnx"]
     else:
         all_args = sys.argv[1:]
         input_globs = []
-        float_quantization = False
+        method = "integer_weights"
         for arg in all_args:
             if arg.startswith("-"):
                 if arg == "-f" or arg == "--float":
-                    float_quantization = True
+                    method = "float_weights"
+                elif arg == "-a" or arg == "--activations":
+                    method = "integer_activations"
                 else:
                     print(f"Unknown option: {arg}")
                     sys.exit(1)
@@ -163,7 +164,14 @@ if __name__ == "__main__":
             if input_filename.endswith("_quantized_weights.onnx"):
                 print(f"Skipping {input_filename} as it is already quantized.")
                 continue
-            original_model = onnx.load(input_filename)
-            new_model = quantize_weights(original_model, float_quantization=float_quantization)
             output_filename = os.path.splitext(input_filename)[0] + "_quantized_weights.onnx"
-            onnx.save(new_model, output_filename)
+            if method == "float_weights" or method == "integer_weights":
+                original_model = onnx.load(input_filename)
+                float_quantization = (method == "float_weights")
+                new_model = quantize_weights(original_model, float_quantization=float_quantization)
+                onnx.save(new_model, output_filename)
+            elif method == "integer_activations":
+                quantize_dynamic(input_filename, output_filename, weight_type=QuantType.QUInt8)
+            else:
+                print(f"Unknown quantization method: {method}")
+                sys.exit(1)
