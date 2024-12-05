@@ -9,6 +9,7 @@ def check_quantization(float_model):
     onnx.checker.check_model(float_model)
 
     quantized_model = quantize_weights(float_model, min_elements=2)
+    quantized_float_model = quantize_weights(float_model, min_elements=2, float_quantization=True)
 
     float_session = ort.InferenceSession(float_model.SerializeToString())
     actual_float_output = np.array(
@@ -18,6 +19,11 @@ def check_quantization(float_model):
     quantized_session = ort.InferenceSession(quantized_model.SerializeToString())
     actual_quantized_output = np.array(
         quantized_session.run(None, {})[0], 
+        dtype=np.float32)
+
+    quantized_float_session = ort.InferenceSession(quantized_float_model.SerializeToString())
+    actual_quantized_float_output = np.array(
+        quantized_float_session.run(None, {})[0], 
         dtype=np.float32)
 
     output_min = np.min(actual_float_output)
@@ -32,6 +38,11 @@ def check_quantization(float_model):
     max_diff = np.max(output_diff)
     if max_diff > output_bin_size:
         raise Exception(f"Max difference {max_diff} is greater than output bin size {output_bin_size}.")
+
+    output_qf_diff = np.abs(actual_float_output - actual_quantized_float_output)
+    max_qf_diff = np.max(output_qf_diff)
+    if max_qf_diff > output_bin_size:
+        raise Exception(f"Max difference {max_qf_diff} is greater than output bin size {output_bin_size}.")
 
 def test_single_constant():
     weights_shape = (1, 1, 2, 2)

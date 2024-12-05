@@ -6,7 +6,6 @@ import onnx
 DEFAULT_MIN_ELEMENTS = 16 * 1024
 
 def quantize_tensor(name, value_tensor, original_output_tensor_name, graph):
-    # print(f"Quantizing {name} with {elements} elements.")
     float_values = value_tensor.values
     min_val = np.min(float_values)
     max_val = np.max(float_values)
@@ -56,8 +55,39 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph):
     # Add the quantized tensor to the graph.
     graph.nodes.append(dequantized_node)
 
+def float_quantize_node(name, value_tensor, original_output_tensor_name, graph, levels=256):
+    float_values = value_tensor.values
+    min_val = np.min(float_values)
+    max_val = np.max(float_values)
+    range_val = max_val - min_val
+    inverse_range = 1.0 / range_val
+    zero_point = round(-min_val * inverse_range * 255.0) - 128
+    scale_value = range_val / 255.0        
+    # y = (x - zero_point) * scale
+    # print(f"Min: {min_val}, Max: {max_val}, Range: {range_val}, Inverse Range: {inverse_range}, Zero Point: {zero_point}")
+    quantized_values = np.round(float_values * inverse_range * 255.0) + zero_point
+    # print(f"Quantized values: {quantized_values}")
+    quantized_values = np.clip(quantized_values, -128, 127).astype(np.int8)
+    dequantized_values = ((quantized_values.astype(np.int32) - zero_point) * scale_value).astype(np.float32)
+    # print(f"Dequantized values: {dequantized_values}")
 
-def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS):
+    dequantized_tensor = gs.Constant(
+        name=f"{name}_dequantized", 
+        values=dequantized_values)    
+
+    for node in graph.nodes:
+        for i, tensor in enumerate(node.inputs):
+            if tensor.name == original_output_tensor_name:
+                node.inputs[i] = dequantized_tensor
+
+    for i, tensor in enumerate(graph.outputs):
+        if tensor.name == original_output_tensor_name:
+            graph.outputs[i] = dequantized_tensor
+
+    # Add the quantized tensor to the graph.
+    # graph.nodes.append(dequantized_tensor)
+
+def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False):
     graph = gs.import_onnx(model)
 
     original_graph = graph.copy()
@@ -74,7 +104,10 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS):
         if elements < min_elements:
             # print(f"Not quantizing {name} with {elements} elements.")
             continue
-        quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
+        if float_quantization:
+            float_quantize_node(name, value_tensor, original_output_tensor_name, graph)
+        else:
+            quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
 
     for name, value_tensor in original_graph.tensors().items():
         if value_tensor.__class__ != gs.Constant:
@@ -84,7 +117,10 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS):
         if elements < min_elements:
             # print(f"Not quantizing {name} with {elements} elements.")
             continue
-        quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
+        if float_quantization:           
+            float_quantize_node(name, value_tensor, original_output_tensor_name, graph)
+        else:
+            quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
     
     graph.cleanup(remove_unused_graph_inputs=False).toposort()
 
@@ -104,7 +140,18 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         input_globs = ["*.onnx"]
     else:
-        input_globs = sys.argv[1:]
+        all_args = sys.argv[1:]
+        input_globs = []
+        float_quantization = False
+        for arg in all_args:
+            if arg.startswith("-"):
+                if arg == "-f" or arg == "--float":
+                    float_quantization = True
+                else:
+                    print(f"Unknown option: {arg}")
+                    sys.exit(1)
+            else:
+                input_globs.append(arg)
 
     for input_glob in input_globs:
         input_filenames = list(glob.glob(input_glob))
@@ -117,6 +164,6 @@ if __name__ == "__main__":
                 print(f"Skipping {input_filename} as it is already quantized.")
                 continue
             original_model = onnx.load(input_filename)
-            new_model = quantize_weights(original_model)
+            new_model = quantize_weights(original_model, float_quantization=float_quantization)
             output_filename = os.path.splitext(input_filename)[0] + "_quantized_weights.onnx"
             onnx.save(new_model, output_filename)
