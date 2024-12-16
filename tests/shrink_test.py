@@ -3,7 +3,7 @@ from onnx import helper as h, TensorProto as tp
 import onnxruntime as ort
 import numpy as np
 
-from onnx_weight_quantization import quantize_weights
+from onnx_shrink_ray.shrink import quantize_weights
 
 def check_quantization(float_model):
     onnx.checker.check_model(float_model)

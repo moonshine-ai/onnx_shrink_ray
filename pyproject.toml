@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onnx_shrink_ray"
+version = "0.0.6"
+authors = [
+  { name="Pete Warden", email="pete@petewarden.com" },
+]
+description = "Shrinks the size of ONNX files by quantizing large float constants into eight bit equivalents, while leaving all calculations in floating point."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "onnx",
+    "onnx_graphsurgeon",
+    "onnxruntime",
+]
+[project.urls]
+Homepage = "https://github.com/usefulsensors/onnx_shrink_ray"
+Issues = "https://github.com/usefulsensors/onnx_shrink_ray/issues"

@@ -7,16 +7,21 @@ from onnxruntime.quantization import quantize_dynamic, QuantType
 DEFAULT_MIN_ELEMENTS = 16 * 1024
 
 def quantize_tensor(name, value_tensor, original_output_tensor_name, graph):
+    """Quantize a constant tensor to int8 using the DequantizeLinear op.
+    
+        Args:
+            name: The name of the tensor to quantize.
+            value_tensor: The tensor to quantize.
+            original_output_tensor_name: The name of the original tensor in the graph.
+            graph: The graph to modify.
+    """
     float_values = value_tensor.values
     min_val = np.min(float_values)
     max_val = np.max(float_values)
     range_val = max_val - min_val
     inverse_range = 1.0 / range_val
     zero_point = round(-min_val * inverse_range * 255.0) - 128
-    # y = (x - zero_point) * scale
-    # print(f"Min: {min_val}, Max: {max_val}, Range: {range_val}, Inverse Range: {inverse_range}, Zero Point: {zero_point}")
     quantized_values = np.round(float_values * inverse_range * 255.0) + zero_point
-    # print(f"Quantized values: {quantized_values}")
     quantized_values = np.clip(quantized_values, -128, 127).astype(np.int8)
 
     quantized_tensor = gs.Constant(
@@ -53,10 +58,18 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph):
         if tensor.name == original_output_tensor_name:
             graph.outputs[i] = dequantized_tensor
 
-    # Add the quantized tensor to the graph.
     graph.nodes.append(dequantized_node)
 
 def float_quantize_node(name, value_tensor, original_output_tensor_name, graph, levels=256):
+    """Quantize a constant tensor to a small number of float values.
+    
+        Args:
+            name: The name of the tensor to quantize.
+            value_tensor: The tensor to quantize.
+            original_output_tensor_name: The name of the original tensor in the graph.
+            graph: The graph to modify.
+            levels: The number of levels to quantize to.
+    """
     float_values = value_tensor.values
     min_val = np.min(float_values)
     max_val = np.max(float_values)
@@ -66,10 +79,8 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, graph, 
     zero_point = round(-min_val * inverse_range * (levels - 1)) - half_levels
     scale_value = range_val / (levels - 1)
     quantized_values = np.round(float_values * inverse_range * (levels - 1)) + zero_point
-    # print(f"Quantized values: {quantized_values}")
     quantized_values = np.clip(quantized_values, -half_levels, (half_levels - 1))
     dequantized_values = ((quantized_values.astype(np.int32) - zero_point) * scale_value).astype(np.float32)
-    # print(f"Dequantized values: {dequantized_values}")
 
     dequantized_tensor = gs.Constant(
         name=f"{name}_dequantized", 
@@ -85,21 +96,26 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, graph, 
             graph.outputs[i] = dequantized_tensor
 
 def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256):
+    """Quantize the weights of an ONNX model.
+    
+        Args:
+            model: The ONNX model to quantize.
+            min_elements: The minimum number of elements a tensor must have to be quantized.
+            float_quantization: If True, store the quantized values as float, not integers.
+            float_levels: The number of levels to quantize to if using float quantization.
+    """
     graph = gs.import_onnx(model)
 
     original_graph = graph.copy()
 
-    # Quantize the weights
     for node in original_graph.nodes:
         if node.op != "Constant":
-            # print(f"Node {node.name} is not a Constant node. Skipping quantization.")
             continue
         name = node.name
         value_tensor = node.attrs["value"]
         original_output_tensor_name = node.outputs[0].name
         elements = np.prod(value_tensor.shape)
         if elements < min_elements:
-            # print(f"Not quantizing {name} with {elements} elements.")
             continue
         if float_quantization:
             float_quantize_node(name, value_tensor, original_output_tensor_name, graph, levels=float_levels)
@@ -112,7 +128,6 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantizatio
         original_output_tensor_name = name
         elements = np.prod(value_tensor.shape)
         if elements < min_elements:
-            # print(f"Not quantizing {name} with {elements} elements.")
             continue
         if float_quantization:           
             float_quantize_node(name, value_tensor, original_output_tensor_name, graph, levels=float_levels)
@@ -130,6 +145,7 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantizatio
 
 
 if __name__ == "__main__":
+    """Command line utility to quantize ONNX models."""
     import argparse
     import glob
     import os
@@ -159,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_suffix", "-s",
         help="Suffix to add to the output model filenames.",
-        default="quantized_weights.onnx",
+        default="_quantized_weights.onnx",
     )
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
