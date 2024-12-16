@@ -2,6 +2,17 @@
 
 Shrinks the size of ONNX files by quantizing large float constants into eight bit equivalents, while leaving all calculations in floating point.
 
+- [Installation](#installation)
+- [Usage](#usage)
+  - [To reduce the size of a single file](#to-reduce-the-size-of-a-single-file)
+  - [To reduce the compressed size of a file](#to-reduce-the-compressed-size-of-a-file)
+- [What Shrink Ray does](#what-shrink-ray-does)
+- [Results](#results)
+  - [Moonshine Tiny](#moonshine-tiny)
+  - [Moonshine Base](#moonshine-base)
+  - [Notes](#notes)
+ - [Other Models](#other-models)
+  
 ## Installation
 
 The easiest way to get started is to install this package in Python using pip:
@@ -95,3 +106,9 @@ Some interesting patterns are visible:
  - Brotli does a better job at compressing these files than gzip, though the compression process takes significantly longer in my experience. Since brotli is now widely supported by browsers, it seems like the best method to use overall.
 
  - Apart from the integer weights, most of the float weights versions have similar latencies to the original model. This is expected, since the overall network architecture isn't changed, just the values stored in constants. The only exception is the tiny float weights with 100 levels, which is unexpectedly fast. I don't have a good explanation for this yet, it will require deeper profiling.
+
+ ## Other Models
+
+ I haven't done widespread testing with other models to see what the quality, size, and performance impact is. I'll be maintaining this repository on a best effort basis, so though there are no guarantees on fixes, please [file an issue](https://github.com/usefulsensors/onnx_shrink_ray/issues) if you hit problems with your own models and I'll take a look.
+
+ Pete Warden, pete@usefulsensors.com
