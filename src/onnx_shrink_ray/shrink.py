@@ -177,6 +177,11 @@ if __name__ == "__main__":
         help="Suffix to add to the output model filenames.",
         default="_quantized_weights.onnx",
     )
+    parser.add_argument(
+        "--op_types_to_quantize", "-q",
+        help="Comma-separated list of op types to quantize (default is all supported).",
+        default=None,
+    )
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
     if len(args.globs) == 0:
@@ -184,6 +189,11 @@ if __name__ == "__main__":
 
     if args.output_dir is not None and not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
+
+    if args.op_types_to_quantize is None:
+        op_types_to_quantize = None
+    else:
+        op_types_to_quantize = args.op_types_to_quantize.split(",")
 
     for input_glob in args.globs:
         if os.path.isdir(input_glob):
@@ -213,7 +223,11 @@ if __name__ == "__main__":
                 new_model = quantize_weights(original_model, float_quantization=float_quantization, float_levels=args.float_levels)
                 onnx.save(new_model, output_filename)
             elif args.method == "integer_activations":
-                quantize_dynamic(input_filename, output_filename, weight_type=QuantType.QUInt8)
+                quantize_dynamic(
+                    input_filename, 
+                    output_filename, 
+                    weight_type=QuantType.QUInt8,
+                    op_types_to_quantize=op_types_to_quantize)
             else:
                 print(f"Unknown quantization method: {args.method}")
                 sys.exit(1)
