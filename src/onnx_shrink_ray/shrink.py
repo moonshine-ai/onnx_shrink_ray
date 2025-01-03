@@ -113,6 +113,8 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantizatio
             continue
         name = node.name
         value_tensor = node.attrs["value"]
+        if value_tensor.dtype != np.float32 and value_tensor.dtype != np.float64:
+            continue
         original_output_tensor_name = node.outputs[0].name
         elements = np.prod(value_tensor.shape)
         if elements < min_elements:
@@ -123,6 +125,8 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantizatio
             quantize_tensor(name, value_tensor, original_output_tensor_name, graph)
 
     for name, value_tensor in original_graph.tensors().items():
+        if value_tensor.dtype != np.float32 and value_tensor.dtype != np.float64:
+            continue
         if value_tensor.__class__ != gs.Constant:
             continue
         original_output_tensor_name = name
@@ -142,6 +146,68 @@ def quantize_weights(model, min_elements=DEFAULT_MIN_ELEMENTS, float_quantizatio
     onnx.checker.check_model(new_model)
     
     return new_model
+
+def print_weight_info_for_graph(graph, total_bytes, node_count, initializer_count, already_processed, min_elements=DEFAULT_MIN_ELEMENTS):
+    for node in graph.nodes:
+        for attr in node.attrs.values():
+            if isinstance(attr, gs.Graph):
+                total_bytes, node_count, initializer_count, already_processed = print_weight_info_for_graph(
+                    attr, total_bytes, node_count, initializer_count, already_processed, min_elements)
+        if node.op != "Constant":
+            continue
+        output_tensor_name = node.outputs[0].name
+        if output_tensor_name in already_processed:
+            continue
+        already_processed.add(output_tensor_name)
+        name = node.name
+        value_tensor = node.attrs["value"]
+        elements = np.prod(value_tensor.shape)
+        byte_count = int(elements * value_tensor.dtype.itemsize)
+        total_bytes += byte_count
+        if elements < min_elements:
+            continue
+        node_count += 1
+        print(f"Node: {name}: {value_tensor.shape} - {elements} elements, {value_tensor.dtype}, {byte_count:,} bytes")
+
+    for name, value_tensor in graph.tensors().items():
+        if value_tensor.__class__ != gs.Constant:
+            continue
+        if name in already_processed:
+            continue
+        already_processed.add(name)
+        elements = np.prod(value_tensor.shape)
+        byte_count = int(elements * value_tensor.dtype.itemsize)
+        total_bytes += byte_count
+        if elements < min_elements:
+            continue
+        initializer_count += 1
+        print(f"Initializer: {name}: {value_tensor.shape} - {elements:,} elements, {value_tensor.dtype}, {byte_count:,} bytes")
+
+    return total_bytes, node_count, initializer_count, already_processed
+
+def print_weight_info(filename, min_elements=DEFAULT_MIN_ELEMENTS):
+    """Return information about the size of the weights in an ONNX model.
+    
+        Args:
+            model: The ONNX model to inspect.
+    """
+    graph = gs.import_onnx(onnx.load(filename))
+
+    print(f"Model: {filename}")
+    file_byte_count = os.path.getsize(filename)
+
+    total_bytes = 0
+    node_count = 0
+    initializer_count = 0
+    already_processed = set()
+
+    total_bytes, node_count, initializer_count, already_processed = print_weight_info_for_graph(
+        graph, total_bytes, node_count, initializer_count, already_processed, min_elements)
+
+    print(f"Total nodes: {node_count}")
+    print(f"Total initializers: {initializer_count}")
+    print(f"Total bytes from weights: {total_bytes:,} bytes, {file_byte_count - total_bytes:,} bytes from other data")
+    print("-------------------------------------------")
 
 
 if __name__ == "__main__":
@@ -182,6 +248,12 @@ if __name__ == "__main__":
         help="Comma-separated list of op types to quantize (default is all supported).",
         default=None,
     )
+    parser.add_argument(
+        "--info", "-i",
+        help="Whether to print information about the weights in the model.",
+        default=False,
+        action="store_true",
+    )
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
     if len(args.globs) == 0:
@@ -206,6 +278,9 @@ if __name__ == "__main__":
         for input_filename in input_filenames:
             if args.output_suffix != ".onnx" and input_filename.endswith(args.output_suffix):
                 print(f"Skipping '{input_filename}' as it is already quantized.")
+                continue
+            if args.info:
+                print_weight_info(input_filename)
                 continue
             input_base = os.path.basename(input_filename)
             input_dir = os.path.dirname(input_filename)
