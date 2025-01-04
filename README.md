@@ -6,6 +6,7 @@ Shrinks the size of ONNX files by quantizing large float constants into eight bi
 - [Usage](#usage)
   - [To reduce the size of a single file](#to-reduce-the-size-of-a-single-file)
   - [To reduce the compressed size of a file](#to-reduce-the-compressed-size-of-a-file)
+  - [To print information about the weights in a file](#to-print-information-about-the-weights-in-a-file)
 - [What Shrink Ray does](#what-shrink-ray-does)
 - [Results](#results)
   - [Moonshine Tiny](#moonshine-tiny)
@@ -44,6 +45,26 @@ A lot of downloads and app bundles are automatically compressed using a standard
 This tool does this by rounding all the float values in a weight array to the nearest in a limited number of quantized steps, but then storing the results back into a 32-bit floating point tensor. This means the uncompressed size on disk remains the same, but the compressed version is often several times smaller. This is because there's now only a limited number of values in each weight tensor, so there's a lot more repetition in the byte stream for the compression algorithm to take advantage of.
 
 By default, each weight tensor is quantized to 256 levels, but since the results are stored as floating point values, you can modify this to trade off compressed file size for accuracy. For example, increasing the `--float_levels` argument to 1,000 can improve accuracy at the cost of a larger compressed file, whereas 100 would shrink the size, but could negatively impact quality.
+
+### To print information about the weights in a file
+
+```bash
+python -m onnx_shrink_ray.shrink --info myfile.onnx
+```
+
+This will analyze the file, and output information about the weight arrays stored in it, including their shape, type, and size in bytes. It will also show how much of the file size is weights, and how much is from other information. Ideally, the weights should be the majority of the file size. Here is some example output:
+
+```bash
+Model: decoder_model_merged.onnx
+Initializer: onnx::MatMul_2282_merged_0_quantized: [288, 288] - 82,944 elements, uint8, 82,944 bytes
+...
+Initializer: onnx::MatMul_2444_merged_0_quantized: [1152, 288] - 331,776 elements, uint8, 331,776 bytes
+Initializer: model.decoder.embed_tokens.weight_merged_0_quantized: [32768, 288] - 9,437,184 elements, int8, 9,437,184 bytes 
+Total nodes: 0
+Total initializers: 61
+Total bytes from weights: 19,475,173 bytes, 9,819,391 bytes from other data
+-------------------------------------------
+```
 
 ## What Shrink Ray does
 
