@@ -50,30 +50,56 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root
         name=f"{name}_quantized", 
         values=quantized_values)
     
-    zero_point_tensor = gs.Constant(
-        name=f"{name}_zero_point", 
-        values=np.array([zero_point], dtype=np.int8))
-
     scale_value = range_val / 255.0        
     scale_tensor = gs.Constant(
         name=f"{name}_scale",
         values=np.array([scale_value], dtype=np.float32))
+
+    zero_point_tensor = gs.Constant(
+        name=f"{name}_zero_point", 
+        values=np.array([-zero_point * scale_value], dtype=np.float32))
     
-    dequantized_tensor_name = f"{name}_dequantized_tensor"
-    dequantized_tensor = gs.Variable(
-        name=dequantized_tensor_name, 
+    # DequantizeLinear is surprisingly slow in the OnnxRuntime, so achieve the
+    # same effect with a Cast, Mul, and Add.
+    cast_tensor_name = f"{name}_cast_tensor"
+    cast_tensor = gs.Variable(
+        name=cast_tensor_name, 
         dtype=np.float32,
         shape=value_tensor.shape)
+    cast_node = gs.Node(
+        op="Cast",
+        name=f"{name}_cast_node",
+        inputs=[quantized_tensor],
+        outputs=[cast_tensor],
+        attrs={"to": np.float32})
 
-    dequantized_node = gs.Node(
-        op="DequantizeLinear", 
-        name=f"{name}_dequantized_node", 
-        inputs=[quantized_tensor, scale_tensor, zero_point_tensor],
-        outputs=[dequantized_tensor])
+    mul_tensor_name = f"{name}_mul_tensor"
+    mul_tensor = gs.Variable(
+        name=mul_tensor_name, 
+        dtype=np.float32,
+        shape=value_tensor.shape)
+    mul_node = gs.Node(
+        op="Mul",
+        name=f"{name}_mul_node",
+        inputs=[cast_tensor, scale_tensor],
+        outputs=[mul_tensor])
 
-    replace_tensor_for_subgraph(root_graph, original_output_tensor_name, dequantized_tensor)
+    add_tensor_name = f"{name}_add_tensor"
+    add_tensor = gs.Variable(
+        name=add_tensor_name, 
+        dtype=np.float32,
+        shape=value_tensor.shape)
+    add_node = gs.Node(
+        op="Add",
+        name=f"{name}_add_node",
+        inputs=[mul_tensor, zero_point_tensor],
+        outputs=[add_tensor])
 
-    root_graph.nodes.append(dequantized_node)
+    replace_tensor_for_subgraph(root_graph, original_output_tensor_name, add_tensor)
+
+    root_graph.nodes.append(cast_node)
+    root_graph.nodes.append(mul_node)
+    root_graph.nodes.append(add_node)
 
 
 def float_quantize_node(name, value_tensor, original_output_tensor_name, root_graph, levels=256):
