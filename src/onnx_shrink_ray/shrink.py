@@ -266,6 +266,11 @@ if __name__ == "__main__":
     import os
     import sys
 
+    def get_list_arg(arg):
+        if arg is None:
+            return None
+        return arg.split(",")
+
     parser = argparse.ArgumentParser(
         prog=sys.argv[0],
         description="Quantization utility for ONNX models",
@@ -298,6 +303,16 @@ if __name__ == "__main__":
         default=None,
     )
     parser.add_argument(
+        "--nodes_to_quantize", "-t",
+        help="Comma-separated list of node names to quantize (default is all).",
+        default=None,
+    )
+    parser.add_argument(
+        "--nodes_to_exclude", "-n",
+        help="Comma-separated list of node names not to quantize (default is none).",
+        default=None,
+    )
+    parser.add_argument(
         "--info", "-i",
         help="Whether to print information about the weights in the model.",
         default=False,
@@ -311,10 +326,9 @@ if __name__ == "__main__":
     if args.output_dir is not None and not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
 
-    if args.op_types_to_quantize is None:
-        op_types_to_quantize = None
-    else:
-        op_types_to_quantize = args.op_types_to_quantize.split(",")
+    op_types_to_quantize = get_list_arg(args.op_types_to_quantize)
+    nodes_to_quantize = get_list_arg(args.nodes_to_quantize)
+    nodes_to_exclude = get_list_arg(args.nodes_to_exclude)
 
     for input_glob in args.globs:
         if os.path.isdir(input_glob):
@@ -352,6 +366,8 @@ if __name__ == "__main__":
                     output_filename, 
                     weight_type=QuantType.QUInt8,
                     op_types_to_quantize=op_types_to_quantize,
+                    nodes_to_quantize=nodes_to_quantize,
+                    nodes_to_exclude=nodes_to_exclude,
                     extra_options={"EnableSubgraph": True})
             else:
                 print(f"Unknown quantization method: {args.method}")
