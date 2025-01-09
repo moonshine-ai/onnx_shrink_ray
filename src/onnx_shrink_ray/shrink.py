@@ -26,6 +26,32 @@ def replace_tensor_for_subgraph(graph, original_tensor_name, new_tensor):
         if tensor.name == original_tensor_name:
             graph.outputs[i] = new_tensor
 
+def gather_initializers_in_graph(graph, all_initializers):
+
+    for initializer in graph.initializer:
+        all_initializers[initializer.name] = initializer
+        graph.initializer.remove(initializer)
+
+    for node in graph.node:
+        if node.op_type == "If":
+            for attr in node.attribute:
+                if attr.name == "then_branch":
+                    all_initializers = gather_initializers_in_graph(attr.g, all_initializers)
+                elif attr.name == "else_branch":
+                    all_initializers = gather_initializers_in_graph(attr.g, all_initializers)
+
+    return all_initializers
+
+def hoist_subgraph_initializers(onnx_model):
+    """GraphSurgeon seems to leave duplicated initializers in the graph, so remove them."""
+
+    all_initializers = {}
+    gather_initializers_in_graph(onnx_model.graph, all_initializers)
+
+    for name, initializer in all_initializers.items():
+        onnx_model.graph.initializer.append(initializer)
+
+    return onnx_model
 
 def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root_graph):
     """Quantize a constant tensor to int8 using the DequantizeLinear op.
@@ -130,10 +156,12 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, root_gr
 
     replace_tensor_for_subgraph(root_graph, original_output_tensor_name, dequantized_tensor)
 
-def quantize_weights_for_graph(graph, root_graph, already_processed, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256):
+def quantize_weights_for_graph(graph, root_graph, already_processed, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256, verbose=False):
     for node in graph.nodes:
         for subgraph in node.attrs.values():
             if isinstance(subgraph, gs.Graph):
+                if verbose:
+                    print(f"Processing subgraph {subgraph.name}")
                 already_processed = quantize_weights_for_graph(
                     subgraph, root_graph, already_processed, min_elements, float_quantization, float_levels)
         if node.op != "Constant":
@@ -149,6 +177,8 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
         elements = np.prod(value_tensor.shape)
         if elements < min_elements:
             continue
+        if verbose:
+            print(f"Processing node {name}")
         if float_quantization:
             float_quantize_node(name, value_tensor, original_output_tensor_name, root_graph, levels=float_levels)
         else:
@@ -166,6 +196,8 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
         elements = np.prod(value_tensor.shape)
         if elements < min_elements:
             continue
+        if verbose:
+            print(f"Processing initializer {name}")
         if float_quantization:
             float_quantize_node(name, value_tensor, original_output_tensor_name, root_graph, levels=float_levels)
         else:
@@ -173,24 +205,29 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
 
     return already_processed
 
-def quantize_weights(input_filename, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256):
+def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256, verbose=False):
     """Quantize the weights of an ONNX model.
     
         Args:
-            input_filename: The path to the ONNX model to quantize.
+            input_data: The path or contents of the ONNX model to quantize.
             min_elements: The minimum number of elements a tensor must have to be quantized.
             float_quantization: If True, store the quantized values as float, not integers.
             float_levels: The number of levels to quantize to if using float quantization.
+            verbose: If True, log detailed information about the weight processing.
     """
-    graph = gs.import_onnx(input_filename)
+    if verbose:
+        print(f"quantize_weights(input_data, min_elements={min_elements}, float_quantization={float_quantization}, float_levels={float_levels})")
+ 
+    graph = gs.import_onnx(input_data)
 
     already_processed = set()
-    quantize_weights_for_graph(graph, graph, already_processed, min_elements, float_quantization, float_levels)
+    quantize_weights_for_graph(graph, graph, already_processed, min_elements, float_quantization, float_levels, verbose)
     
     graph.cleanup(remove_unused_graph_inputs=False).toposort(recurse_subgraphs=True)
 
     no_shape_model = gs.export_onnx(graph)
-    new_model = onnx.shape_inference.infer_shapes(no_shape_model)
+    deduped_model = hoist_subgraph_initializers(no_shape_model)
+    new_model = onnx.shape_inference.infer_shapes(deduped_model)
 
     onnx.checker.check_model(new_model)
     
@@ -218,10 +255,12 @@ def print_weight_info_for_graph(graph, total_bytes, node_count, initializer_coun
         node_count += 1
         print(f"Node: {name}: {value_tensor.shape} - {elements} elements, {value_tensor.dtype}, {byte_count:,} bytes")
 
+    duplicate_names = set()
     for name, value_tensor in graph.tensors().items():
         if value_tensor.__class__ != gs.Constant:
             continue
         if name in already_processed:
+            duplicate_names.add(name)
             continue
         already_processed.add(name)
         elements = np.prod(value_tensor.shape)
@@ -232,6 +271,9 @@ def print_weight_info_for_graph(graph, total_bytes, node_count, initializer_coun
         initializer_count += 1
         print(f"Initializer: {name}: {value_tensor.shape} - {elements:,} elements, {value_tensor.dtype}, {byte_count:,} bytes")
 
+    if len(duplicate_names) > 0:
+        print(f"Duplicate initializers: {duplicate_names}")
+
     return total_bytes, node_count, initializer_count, already_processed
 
 def print_weight_info(filename, min_elements=DEFAULT_MIN_ELEMENTS):
@@ -240,7 +282,8 @@ def print_weight_info(filename, min_elements=DEFAULT_MIN_ELEMENTS):
         Args:
             model: The ONNX model to inspect.
     """
-    graph = gs.import_onnx(onnx.load(filename))
+    onnx_model = onnx.load(filename)
+    graph = gs.import_onnx(onnx_model)
 
     print(f"Model: {filename}")
     file_byte_count = os.path.getsize(filename)
@@ -318,6 +361,18 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        help="Log detailed information about the weight processing.",
+        default=False,
+        action="store_true",
+    )    
+    parser.add_argument(
+        "--save-protos", "-p",
+        help="Write out the input and output ONNX files as text protobufs.",
+        default=False,
+        action="store_true",
+    )    
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
     if len(args.globs) == 0:
@@ -345,6 +400,8 @@ if __name__ == "__main__":
             if args.output_suffix != ".onnx" and input_filename.endswith(args.output_suffix):
                 print(f"Skipping '{input_filename}' as it is already quantized.")
                 continue
+            if args.verbose:
+                print(f"Processing '{input_filename}'")
             input_base = os.path.basename(input_filename)
             input_dir = os.path.dirname(input_filename)
             output_base = os.path.splitext(input_base)[0] + args.output_suffix
@@ -352,15 +409,27 @@ if __name__ == "__main__":
                 output_filename = os.path.join(input_dir, output_base)
             else:
                 output_filename = os.path.join(args.output_dir, output_base)
+            if args.verbose:
+                print(f"Writing to '{output_filename}'")
             if output_filename == input_filename:
                 print(f"Skipping '{input_filename}' as the output filename is the same and it would be overwritten.")
                 continue
+            if args.verbose:
+               input_file_length = os.path.getsize(input_filename)
             if args.method == "float_weights" or args.method == "integer_weights":
                 original_model = onnx.load(input_filename)
+                if args.save_protos:
+                    with open(input_filename + ".txt", "w") as f:
+                        f.write(str(original_model))
                 float_quantization = (args.method == "float_weights")
-                new_model = quantize_weights(original_model, float_quantization=float_quantization, float_levels=args.float_levels)
+                new_model = quantize_weights(original_model, float_quantization=float_quantization, float_levels=args.float_levels, verbose=args.verbose)
                 onnx.save(new_model, output_filename)
+                if args.save_protos:
+                    with open(output_filename + ".txt", "w") as f:
+                        f.write(str(new_model))
             elif args.method == "integer_activations":
+                if args.verbose:
+                    print(f"quantize_dynamic('{input_filename}', '{output_filename}', weight_type=QuantType.QUInt8, op_types_to_quantize={op_types_to_quantize}, nodes_to_quantize={nodes_to_quantize}, nodes_to_exclude={nodes_to_exclude}, extra_options={{'EnableSubgraph': True}})")
                 quantize_dynamic(
                     input_filename, 
                     output_filename, 
@@ -372,3 +441,6 @@ if __name__ == "__main__":
             else:
                 print(f"Unknown quantization method: {args.method}")
                 sys.exit(1)
+            if args.verbose:
+                output_file_length = os.path.getsize(output_filename)
+                print(f"Original file size: {input_file_length:,} bytes, quantized file size: {output_file_length:,} bytes")
