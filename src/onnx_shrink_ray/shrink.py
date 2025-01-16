@@ -3,9 +3,11 @@ import numpy as np
 import onnx
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
+
 # Don't quantify constants smaller than this.
 DEFAULT_MIN_ELEMENTS = 16 * 1024
 
+    
 def replace_tensor_for_subgraph(graph, original_tensor_name, new_tensor):
     """Replace a tensor in a graph with a new tensor.
     
@@ -30,7 +32,8 @@ def gather_initializers_in_graph(graph, all_initializers):
 
     for initializer in graph.initializer:
         all_initializers[initializer.name] = initializer
-        graph.initializer.remove(initializer)
+
+    graph.initializer.clear()
 
     for node in graph.node:
         if node.op_type == "If":
@@ -233,60 +236,67 @@ def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quanti
     
     return new_model
 
-def print_weight_info_for_graph(graph, total_bytes, node_count, initializer_count, already_processed, min_elements=DEFAULT_MIN_ELEMENTS):
-    for node in graph.nodes:
-        for subgraph in node.attrs.values():
-            if isinstance(subgraph, gs.Graph):
+def print_weight_info_for_graph(onnx_graph, total_bytes, node_count, initializer_count, already_processed, min_elements=DEFAULT_MIN_ELEMENTS):
+    for node in onnx_graph.node:
+        value_tensor = None
+        for attribute in node.attribute:
+            if attribute.name == "value":
+                value_tensor = attribute.t
+            if attribute.HasField("g"):
+                subgraph = attribute.g
                 total_bytes, node_count, initializer_count, already_processed = print_weight_info_for_graph(
                     subgraph, total_bytes, node_count, initializer_count, already_processed, min_elements)
-        if node.op != "Constant":
+        if node.op_type != "Constant":
             continue
-        output_tensor_name = node.outputs[0].name
+        output_tensor_name = node.output[0]
         if output_tensor_name in already_processed:
             continue
         already_processed.add(output_tensor_name)
         name = node.name
-        value_tensor = node.attrs["value"]
-        elements = np.prod(value_tensor.shape)
-        byte_count = int(elements * value_tensor.dtype.itemsize)
+        elements = np.prod(value_tensor.dims)
+        np_dtype = onnx.helper.tensor_dtype_to_np_dtype(value_tensor.data_type)
+        byte_count = int(elements * np_dtype.itemsize)
         total_bytes += byte_count
         if elements < min_elements:
             continue
         node_count += 1
-        print(f"Node: {name}: {value_tensor.shape} - {elements} elements, {value_tensor.dtype}, {byte_count:,} bytes")
+        print(f"Node: {name}: {value_tensor.dims} - {elements} elements, {np_dtype}, {byte_count:,} bytes")
 
     duplicate_names = set()
-    for name, value_tensor in graph.tensors().items():
-        if value_tensor.__class__ != gs.Constant:
-            continue
+    for value_tensor in onnx_graph.initializer:
+        name = value_tensor.name
         if name in already_processed:
             duplicate_names.add(name)
             continue
         already_processed.add(name)
-        elements = np.prod(value_tensor.shape)
-        byte_count = int(elements * value_tensor.dtype.itemsize)
+        elements = np.prod(value_tensor.dims)
+        np_dtype = onnx.helper.tensor_dtype_to_np_dtype(value_tensor.data_type)
+        byte_count = int(elements * np_dtype.itemsize)
         total_bytes += byte_count
         if elements < min_elements:
             continue
         initializer_count += 1
-        print(f"Initializer: {name}: {value_tensor.shape} - {elements:,} elements, {value_tensor.dtype}, {byte_count:,} bytes")
+        print(f"Initializer: {name}: {value_tensor.dims} - {elements:,} elements, {np_dtype}, {byte_count:,} bytes")
 
     if len(duplicate_names) > 0:
         print(f"Duplicate initializers: {duplicate_names}")
 
     return total_bytes, node_count, initializer_count, already_processed
 
-def print_weight_info(filename, min_elements=DEFAULT_MIN_ELEMENTS):
+def print_weight_info(filename_or_model, min_elements=DEFAULT_MIN_ELEMENTS):
     """Return information about the size of the weights in an ONNX model.
     
         Args:
             model: The ONNX model to inspect.
     """
-    onnx_model = onnx.load(filename)
-    graph = gs.import_onnx(onnx_model)
-
-    print(f"Model: {filename}")
-    file_byte_count = os.path.getsize(filename)
+    if isinstance(filename_or_model, str):
+        filename = filename_or_model
+        onnx_model = onnx.load(filename)
+        file_byte_count = os.path.getsize(filename)
+        print(f"Model: {filename}")
+    else:
+        onnx_model = filename_or_model
+        file_byte_count = onnx_model.ByteSize()
 
     total_bytes = 0
     node_count = 0
@@ -294,7 +304,7 @@ def print_weight_info(filename, min_elements=DEFAULT_MIN_ELEMENTS):
     already_processed = set()
 
     total_bytes, node_count, initializer_count, already_processed = print_weight_info_for_graph(
-        graph, total_bytes, node_count, initializer_count, already_processed, min_elements)
+        onnx_model.graph, total_bytes, node_count, initializer_count, already_processed, min_elements)
 
     print(f"Total nodes: {node_count}")
     print(f"Total initializers: {initializer_count}")
