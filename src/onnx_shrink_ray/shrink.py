@@ -97,7 +97,6 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root
         name=cast_tensor_name, 
         dtype=dtype,
         shape=value_tensor.shape)
-    print(f"Casting {name} to {np_dtype}")
     cast_node = gs.Node(
         op="Cast",
         name=f"{name}_cast_node",
