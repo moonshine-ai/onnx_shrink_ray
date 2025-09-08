@@ -66,6 +66,8 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root
             graph: The graph to modify.
             root_graph: The root graph of the model.
     """
+    dtype = value_tensor.dtype
+    np_dtype = onnx.helper.np_dtype_to_tensor_dtype(dtype)
     float_values = value_tensor.values
     min_val = np.min(float_values)
     max_val = np.max(float_values)
@@ -82,30 +84,31 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root
     scale_value = range_val / 255.0        
     scale_tensor = gs.Constant(
         name=f"{name}_scale",
-        values=np.array([scale_value], dtype=np.float32))
+        values=np.array([scale_value], dtype=dtype))
 
     zero_point_tensor = gs.Constant(
         name=f"{name}_zero_point", 
-        values=np.array([-zero_point * scale_value], dtype=np.float32))
+        values=np.array([-zero_point * scale_value], dtype=dtype))
     
     # DequantizeLinear is surprisingly slow in the OnnxRuntime, so achieve the
     # same effect with a Cast, Mul, and Add.
     cast_tensor_name = f"{name}_cast_tensor"
     cast_tensor = gs.Variable(
         name=cast_tensor_name, 
-        dtype=np.float32,
+        dtype=dtype,
         shape=value_tensor.shape)
+    print(f"Casting {name} to {np_dtype}")
     cast_node = gs.Node(
         op="Cast",
         name=f"{name}_cast_node",
         inputs=[quantized_tensor],
         outputs=[cast_tensor],
-        attrs={"to": np.float32})
+        attrs={"to": np_dtype})
 
     mul_tensor_name = f"{name}_mul_tensor"
     mul_tensor = gs.Variable(
         name=mul_tensor_name, 
-        dtype=np.float32,
+        dtype=dtype,
         shape=value_tensor.shape)
     mul_node = gs.Node(
         op="Mul",
@@ -116,7 +119,7 @@ def quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root
     add_tensor_name = f"{name}_add_tensor"
     add_tensor = gs.Variable(
         name=add_tensor_name, 
-        dtype=np.float32,
+        dtype=dtype,
         shape=value_tensor.shape)
     add_node = gs.Node(
         op="Add",
@@ -141,6 +144,7 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, root_gr
             graph: The graph to modify.
             levels: The number of levels to quantize to.
     """
+    dtype = value_tensor.dtype
     float_values = value_tensor.values
     min_val = np.min(float_values)
     max_val = np.max(float_values)
@@ -151,7 +155,7 @@ def float_quantize_node(name, value_tensor, original_output_tensor_name, root_gr
     scale_value = range_val / (levels - 1)
     quantized_values = np.round(float_values * inverse_range * (levels - 1)) + zero_point
     quantized_values = np.clip(quantized_values, -half_levels, (half_levels - 1))
-    dequantized_values = ((quantized_values.astype(np.int32) - zero_point) * scale_value).astype(np.float32)
+    dequantized_values = ((quantized_values.astype(np.int32) - zero_point) * scale_value).astype(dtype)
 
     dequantized_tensor = gs.Constant(
         name=f"{name}_dequantized", 
@@ -171,7 +175,7 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
             continue
         name = node.name
         value_tensor = node.attrs["value"]
-        if value_tensor.dtype != np.float32 and value_tensor.dtype != np.float64:
+        if value_tensor.dtype not in [np.float16, np.float32, np.float64]:
             continue
         original_output_tensor_name = node.outputs[0].name
         if original_output_tensor_name in already_processed:
@@ -188,7 +192,7 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
             quantize_tensor(name, value_tensor, original_output_tensor_name, graph, root_graph)
 
     for name, value_tensor in graph.tensors().items():
-        if value_tensor.dtype != np.float32 and value_tensor.dtype != np.float64:
+        if value_tensor.dtype not in [np.float16, np.float32, np.float64]:
             continue
         if value_tensor.__class__ != gs.Constant:
             continue
@@ -208,7 +212,7 @@ def quantize_weights_for_graph(graph, root_graph, already_processed, min_element
 
     return already_processed
 
-def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256, verbose=False):
+def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quantization=False, float_levels=256, verbose=False, ir_version=None):
     """Quantize the weights of an ONNX model.
     
         Args:
@@ -217,6 +221,7 @@ def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quanti
             float_quantization: If True, store the quantized values as float, not integers.
             float_levels: The number of levels to quantize to if using float quantization.
             verbose: If True, log detailed information about the weight processing.
+            ir_version: The IR version to use for the output ONNX files.
     """
     if verbose:
         print(f"quantize_weights(input_data, min_elements={min_elements}, float_quantization={float_quantization}, float_levels={float_levels})")
@@ -231,6 +236,8 @@ def quantize_weights(input_data, min_elements=DEFAULT_MIN_ELEMENTS, float_quanti
     no_shape_model = gs.export_onnx(graph)
     deduped_model = hoist_subgraph_initializers(no_shape_model)
     new_model = onnx.shape_inference.infer_shapes(deduped_model)
+    if ir_version is not None:
+        new_model.ir_version = ir_version
 
     onnx.checker.check_model(new_model)
     
@@ -382,7 +389,19 @@ if __name__ == "__main__":
         help="Write out the input and output ONNX files as text protobufs.",
         default=False,
         action="store_true",
-    )    
+    )
+    parser.add_argument(
+        "--external-data", "-e",
+        help="Use external data for the output ONNX files.",
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--ir-version", "-r",
+        help="The IR version to use for the output ONNX files.",
+        default=None,
+        type=int,
+    )
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
     if len(args.globs) == 0:
@@ -432,8 +451,8 @@ if __name__ == "__main__":
                     with open(input_filename + ".txt", "w") as f:
                         f.write(str(original_model))
                 float_quantization = (args.method == "float_weights")
-                new_model = quantize_weights(original_model, float_quantization=float_quantization, float_levels=args.float_levels, verbose=args.verbose)
-                onnx.save(new_model, output_filename)
+                new_model = quantize_weights(original_model, float_quantization=float_quantization, float_levels=args.float_levels, verbose=args.verbose, ir_version=args.ir_version)
+                onnx.save(new_model, output_filename, save_as_external_data=args.external_data)
                 if args.save_protos:
                     with open(output_filename + ".txt", "w") as f:
                         f.write(str(new_model))
