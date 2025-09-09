@@ -354,7 +354,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_suffix", "-s",
         help="Suffix to add to the output model filenames.",
-        default="_quantized_weights.onnx",
+        default=None,
     )
     parser.add_argument(
         "--op_types_to_quantize", "-q",
@@ -401,10 +401,21 @@ if __name__ == "__main__":
         default=None,
         type=int,
     )
+    parser.add_argument(
+        "--default-tensor-type", "-d",
+        help="The default tensor type to use for integer activation quantization (1 is float32).",
+        default=None,
+        type=int,
+    )
     parser.add_argument("globs", nargs="*")
     args = parser.parse_args()
     if len(args.globs) == 0:
         args.globs = ["*.onnx"]
+    if args.output_suffix is None:
+        if args.method == "integer_activations":
+            args.output_suffix = "_quantized_activations.onnx"
+        else:
+            args.output_suffix = "_quantized_weights.onnx"
 
     if args.output_dir is not None and not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
@@ -465,7 +476,7 @@ if __name__ == "__main__":
                     op_types_to_quantize=op_types_to_quantize,
                     nodes_to_quantize=nodes_to_quantize,
                     nodes_to_exclude=nodes_to_exclude,
-                    extra_options={"EnableSubgraph": True})
+                    extra_options={"EnableSubgraph": True, "DefaultTensorType": args.default_tensor_type})
             else:
                 print(f"Unknown quantization method: {args.method}")
                 sys.exit(1)
