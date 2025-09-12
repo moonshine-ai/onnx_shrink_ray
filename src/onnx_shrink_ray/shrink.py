@@ -431,11 +431,11 @@ def convert_f16_to_f32_tensor(
     replace_tensor_for_subgraph(root_graph, original_output_tensor_name, f32_tensor)
 
 
-def convert_f16_to_f32(input_model, verbose=False, ir_version=None):
+def convert_f16_to_f32(input_model, verbose=False, ir_version=None, nodes_to_exclude=None):
     graph = gs.import_onnx(input_model)
 
     already_processed = set()
-    convert_f16_to_f32_for_graph(graph, graph, already_processed, verbose)
+    convert_f16_to_f32_for_graph(graph, graph, already_processed, verbose, nodes_to_exclude)
 
     graph.cleanup(remove_unused_graph_inputs=False).toposort(recurse_subgraphs=True)
 
@@ -443,7 +443,7 @@ def convert_f16_to_f32(input_model, verbose=False, ir_version=None):
     # deduped_model = hoist_subgraph_initializers(no_shape_model)
     # new_model = onnx.shape_inference.infer_shapes(deduped_model)
 
-    new_model = gs.export_onnx(graph)
+    new_model = gs.export_onnx(graph, do_type_check=False)
 
     if ir_version is not None:
         new_model.ir_version = ir_version
@@ -451,24 +451,29 @@ def convert_f16_to_f32(input_model, verbose=False, ir_version=None):
     return new_model
 
 
-def convert_f16_to_f32_for_graph(graph, root_graph, already_processed, verbose=False):
+def convert_f16_to_f32_for_graph(graph, root_graph, already_processed, verbose=False, nodes_to_exclude=None):
     for node in graph.nodes:
         for subgraph in node.attrs.values():
             if isinstance(subgraph, gs.Graph):
                 if verbose:
                     print(f"Processing subgraph {subgraph.name}")
                 already_processed = convert_f16_to_f32_for_graph(
-                    subgraph, root_graph, already_processed, verbose
+                    subgraph, root_graph, already_processed, verbose, nodes_to_exclude
                 )
         if node.op == "Cast":
             if node.attrs["to"] == 10 or node.attrs["to"] == 1:
-                if verbose:
-                    print(f"Removing float16 to float 32 cast ({node.name})")
-                cast_input_tensor = node.inputs[0]
-                cast_input_tensor.dtype = np.float32
-                replace_tensor_for_subgraph(
-                    root_graph, node.outputs[0].name, cast_input_tensor
-                )
+                if nodes_to_exclude is not None and node.name in nodes_to_exclude:
+                    if verbose:
+                        print(f"Changing cast {node.name} to float32 because it is in nodes_to_exclude")
+                    node.attrs["to"] = 1
+                else:
+                    if verbose:
+                        print(f"Removing float16 to float 32 cast ({node.name})")
+                    cast_input_tensor = node.inputs[0]
+                    cast_input_tensor.dtype = np.float32
+                    replace_tensor_for_subgraph(
+                        root_graph, node.outputs[0].name, cast_input_tensor
+                    )
         if node.op != "Constant":
             continue
         name = node.name
@@ -524,6 +529,7 @@ def fix_untyped_casts(output_filename, verbose=False, ir_version=None):
                     print(f"Fixing untyped cast {node.name}")
                 node.attrs["to"] = 1
     new_model = gs.export_onnx(graph)
+    new_model.graph.value_info.clear()
     if ir_version is not None:
         new_model.ir_version = ir_version
     onnx.save(new_model, output_filename)
@@ -546,8 +552,10 @@ if __name__ == "__main__":
         description="Quantization utility for ONNX models",
     )
     parser.add_argument(
-        "--method",
+        "--method", # Deprecated name, now using --action
         "-m",
+        "--action",
+        "-a",
         help="How to quantize the models",
         default="integer_weights",
         choices=[
@@ -555,6 +563,7 @@ if __name__ == "__main__":
             "float_weights",
             "integer_activations",
             "f16_to_f32",
+            "to-text-proto"
         ],
     )
     parser.add_argument(
@@ -692,9 +701,6 @@ if __name__ == "__main__":
                 input_file_length = os.path.getsize(input_filename)
             if args.method == "float_weights" or args.method == "integer_weights":
                 original_model = onnx.load(input_filename)
-                if args.save_protos:
-                    with open(input_filename + ".txt", "w") as f:
-                        f.write(str(original_model))
                 float_quantization = args.method == "float_weights"
                 new_model = quantize_weights(
                     original_model,
@@ -710,9 +716,6 @@ if __name__ == "__main__":
                 onnx.save(
                     new_model, output_filename, save_as_external_data=args.external_data
                 )
-                if args.save_protos:
-                    with open(output_filename + ".txt", "w") as f:
-                        f.write(str(new_model))
             elif args.method == "integer_activations":
                 if args.verbose:
                     print(
@@ -737,7 +740,9 @@ if __name__ == "__main__":
                     input_model=original_model,
                     ir_version=args.ir_version,
                     verbose=args.verbose,
+                    nodes_to_exclude=nodes_to_exclude,
                 )
+                new_model.graph.value_info.clear()
                 if args.verbose:
                     print(
                         f"Saving model converted from {input_filename} to {output_filename}"
@@ -745,9 +750,19 @@ if __name__ == "__main__":
                 onnx.save(
                     new_model, output_filename, save_as_external_data=args.external_data
                 )
-                if args.save_protos:
-                    with open(output_filename + ".txt", "w") as f:
-                        f.write(str(new_model))
+            elif args.method == "to-text-proto":
+                original_model = onnx.load(input_filename)
+                tmp_filename = input_filename + ".tmp.txt"
+                output_filename = input_filename + ".txt"
+                with open(tmp_filename, "w") as f:
+                    f.write(str(original_model))
+                with open(output_filename, "w") as f:
+                    with open(tmp_filename, "r") as f2:
+                        for line in f2:
+                            if "raw_data" in line:
+                                continue
+                            f.write(line)
+                os.remove(tmp_filename)
             else:
                 print(f"Unknown quantization method: {args.method}")
                 sys.exit(1)
